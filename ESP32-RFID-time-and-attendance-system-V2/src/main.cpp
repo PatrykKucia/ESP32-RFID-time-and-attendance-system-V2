@@ -4,23 +4,27 @@
 #include <DS3231.h>
 #include <Wire.h>
 #include <SD.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
 
 #define RFID_SS_PIN D8
-#define SD_SS_PIN D4    // CS karty SD
+#define SD_SS_PIN D4
 #define RST_PIN D1
-#define ON_Board_LED 2 
-const int analogInPin = A0;       //Pin analogowy do obsługi przycisków
+#define ON_Board_LED 2
+const int analogInPin = A0;
 
 bool century = false;
 bool h12Flag;
 bool pmFlag;
 
 unsigned long previousMillis = 0;
-const long interval = 100; // co 200 ms sprawdzamy przyciskenum mode_select { NONE, IN, PEOPLE_IN, REG };
+const long interval = 100;
 
 enum mode_select { GREEN, RED, BLUE, NONE };
-// progi analogowe (dostosuj do swojego potencjometru/układu)
-const int sensorWaiting = 50;      
+mode_select currentMode = NONE;
+
+const int sensorWaiting = 50;
 const int sensorInLower = 1000;
 const int sensorInUpper = 1200;
 const int sensorOutLower = 200;
@@ -28,27 +32,33 @@ const int sensorOutUpper = 700;
 const int sensorPeopleLower = 700;
 const int sensorPeopleUpper = 950;
 
-
-// --- RFID i RTC ---
 MFRC522 rfid(RFID_SS_PIN, RST_PIN);
 DS3231 RTC;
-
-// --- ustawienie czasu raz ---
-bool setTimeOnce = false;  // ustaw na true przy pierwszym wgraniu
-
 File logFile;
 
-mode_select readButton() {
-    int sensorValue = analogRead(analogInPin);
+ESP8266WebServer server(80);
 
-    if (sensorValue < sensorWaiting) return NONE;
+const char* ssid = "ESP32_RFID";
+const char* password = "12345678";
 
-    if (sensorValue > sensorInLower && sensorValue < sensorInUpper) return GREEN;
-    else if (sensorValue > sensorOutLower && sensorValue < sensorOutUpper) return RED;
-    else if (sensorValue >= sensorPeopleLower && sensorValue <= sensorPeopleUpper) return BLUE;
-
-    return NONE;
+String modeToString(mode_select mode) {
+  switch (mode) {
+    case GREEN: return "Wejście";
+    case RED: return "Wyjście";
+    case BLUE: return "Rejestracja";
+    default: return "Brak";
+  }
 }
+
+mode_select readButton() {
+  int sensorValue = analogRead(analogInPin);
+  if (sensorValue < sensorWaiting) return NONE;
+  if (sensorValue > sensorInLower && sensorValue < sensorInUpper) return GREEN;
+  else if (sensorValue > sensorOutLower && sensorValue < sensorOutUpper) return RED;
+  else if (sensorValue >= sensorPeopleLower && sensorValue <= sensorPeopleUpper) return BLUE;
+  return NONE;
+}
+
 void logCardToSD(String uid) {
   String timestamp = String(RTC.getYear()) + "-" +
                      String(RTC.getMonth(century)) + "-" +
@@ -57,14 +67,59 @@ void logCardToSD(String uid) {
                      String(RTC.getMinute()) + ":" +
                      String(RTC.getSecond());
 
-  File logFile = SD.open("log.txt", FILE_WRITE);
+  File logFile = SD.open("/log.txt", FILE_WRITE);
   if (logFile) {
-    logFile.println(timestamp + " UID:" + uid);
+    logFile.println(timestamp + ";" + uid + ";" + modeToString(currentMode));
     logFile.close();
-    Serial.println("Logged to SD: " + timestamp + " UID:" + uid);
+    Serial.println("Zapisano: " + timestamp + " UID:" + uid + " Tryb:" + modeToString(currentMode));
   } else {
-    Serial.println("Error opening log.txt");
+    Serial.println("Błąd zapisu log.txt");
   }
+}
+
+void handleRoot() {
+  String html = "<html><head><meta charset='utf-8'><title>Rejestr RFID</title></head><body>";
+  html += "<h2>ESP32 RFID - Rejestr wejść/wyjść</h2>";
+  html += "<p>Aktualny tryb: <b>" + modeToString(currentMode) + "</b></p>";
+  html += "<a href='/setMode?mode=GREEN'><button>Tryb Wejście</button></a>";
+  html += "<a href='/setMode?mode=RED'><button>Tryb Wyjście</button></a>";
+  html += "<a href='/setMode?mode=BLUE'><button>Tryb Rejestracja</button></a>";
+  html += "<hr><h3>Logi:</h3><pre>";
+
+  File logFile = SD.open("/log.txt");
+  if (logFile) {
+    while (logFile.available()) {
+      html += logFile.readStringUntil('\n');
+    }
+    logFile.close();
+  } else {
+    html += "Brak logów.";
+  }
+
+  html += "</pre><hr>";
+  html += "<a href='/download'><button>Pobierz CSV</button></a>";
+  html += "</body></html>";
+
+  server.send(200, "text/html", html);
+}
+
+void handleSetMode() {
+  String m = server.arg("mode");
+  if (m == "GREEN") currentMode = GREEN;
+  else if (m == "RED") currentMode = RED;
+  else if (m == "BLUE") currentMode = BLUE;
+  else currentMode = NONE;
+  handleRoot();
+}
+
+void handleDownload() {
+  File logFile = SD.open("/log.txt");
+  if (!logFile) {
+    server.send(404, "text/plain", "Brak log.txt");
+    return;
+  }
+  server.streamFile(logFile, "text/csv");
+  logFile.close();
 }
 
 void setup() {
@@ -72,98 +127,51 @@ void setup() {
   SPI.begin();
   Wire.begin();
   rfid.PCD_Init();
-
   pinMode(ON_Board_LED, OUTPUT);
   digitalWrite(ON_Board_LED, HIGH);
 
-  Serial.println("RFID ready - scan a card...");
-  if (!rfid.PCD_PerformSelfTest()) {
-    Serial.println("MFRC522 self test FAILED");
+  if (!SD.begin(SD_SS_PIN)) {
+    Serial.println("Błąd inicjalizacji SD!");
   } else {
-      Serial.println("MFRC522 self test OK");
+    Serial.println("SD gotowe.");
   }
 
-  // --- ustawienie czasu na RTC raz ---
-  if (setTimeOnce) {
-      // Przykładowy czas: 16 sierpnia 2022, 10:00:00
-      RTC.setYear(25);
-      RTC.setMonth(10);
-      RTC.setDate(26);
-      RTC.setHour(13);
-      RTC.setMinute(39);
-      RTC.setSecond(0);
-      RTC.setDoW(0);       // 0 = niedziela, 1 = poniedziałek, 2 = wtorek ...
-      RTC.setClockMode(false); // 24h
-      Serial.println("RTC time set. Comment this block after first upload.");
-      // setTimeOnce = false; // po pierwszym ustawieniu możesz zakomentować lub ustawić false
-  }
-    // --- inicjalizacja SD ---
-  if (!SD.begin(SD_SS_PIN)) {
-    Serial.println("SD card initialization failed!");
-  } else {
-    Serial.println("SD card initialized.");
-  }
+  WiFi.softAP(ssid, password);
+  Serial.println("AP uruchomiony. Połącz się z siecią: " + String(ssid));
+  Serial.println("Adres strony: http://192.168.4.1");
+
+  server.on("/", handleRoot);
+  server.on("/setMode", handleSetMode);
+  server.on("/download", handleDownload);
+  server.begin();
 }
 
+void loop() {
+  server.handleClient();
 
-void loop() 
-{
-unsigned long currentMillis = millis();
-  // --- odczyt przycisku co 200ms ---
+  unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval) {
-      previousMillis = currentMillis;
-      mode_select currentMode = readButton();
-
-      switch (currentMode) {
-          case GREEN:
-              Serial.println("Mode:GREEN");
-              break;
-          case RED:
-              Serial.println("Mode:RED");
-              break;
-          case BLUE:
-              Serial.println("Mode:BLUE");
-              break;
-          default:
-              break;
-      }
+    previousMillis = currentMillis;
+    mode_select newMode = readButton();
+    if (newMode != NONE) currentMode = newMode;
   }
 
-  // --- odczyt RFID ---
   if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-      digitalWrite(ON_Board_LED, HIGH);
-      delay(150);
-      digitalWrite(ON_Board_LED, LOW);
+    digitalWrite(ON_Board_LED, HIGH);
+    delay(100);
+    digitalWrite(ON_Board_LED, LOW);
 
-      String uid = "";
-      for (byte i = 0; i < rfid.uid.size; i++) {
-          if (rfid.uid.uidByte[i] < 0x10) uid += "0";
-          uid += String(rfid.uid.uidByte[i], HEX);
-          if (i < rfid.uid.size - 1) uid += ":";
-      }
+    String uid = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      if (rfid.uid.uidByte[i] < 0x10) uid += "0";
+      uid += String(rfid.uid.uidByte[i], HEX);
+      if (i < rfid.uid.size - 1) uid += ":";
+    }
 
-      Serial.print("Card UID: "); Serial.println(uid);
+    Serial.print("Karta UID: "); Serial.println(uid);
+    logCardToSD(uid);
 
-      MFRC522::PICC_Type piccType = rfid.PICC_GetType(rfid.uid.sak);
-      Serial.print("Type: ");
-      Serial.println(rfid.PICC_GetTypeName(piccType));
-
-      logCardToSD(uid); // zapis UID + timestamp na SD
-
-      rfid.PICC_HaltA();
-      rfid.PCD_StopCrypto1();
-  }
-
-  // --- odczyt czasu z RTC co 1s ---
-  static unsigned long lastTimeMillis = 0;
-  if (millis() - lastTimeMillis >= 1000) {
-      lastTimeMillis = millis();
-      Serial.print("RTC Time: ");
-      Serial.print(RTC.getYear(), DEC); Serial.print("-");
-      Serial.print(RTC.getMonth(century), DEC); Serial.print("-");
-      Serial.print(RTC.getDate(), DEC); Serial.print(" ");
-      Serial.print(RTC.getHour(h12Flag, pmFlag), DEC); Serial.print(":");
-      Serial.print(RTC.getMinute(), DEC); Serial.print(":");
-      Serial.println(RTC.getSecond(), DEC);
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
   }
 }
