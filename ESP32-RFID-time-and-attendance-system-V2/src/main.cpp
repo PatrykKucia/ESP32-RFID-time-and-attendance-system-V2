@@ -20,7 +20,7 @@ bool pmFlag;
 unsigned long previousMillis = 0;
 const long interval = 100;
 
-enum mode_select { GREEN, RED, NONE };
+enum mode_select { GREEN, RED, CHECK_ID, NONE };
 mode_select currentMode = NONE;
 
 const int sensorWaiting = 50;
@@ -28,6 +28,8 @@ const int sensorInLower = 1000;
 const int sensorInUpper = 1200;
 const int sensorOutLower = 200;
 const int sensorOutUpper = 700;
+const int sensorCheckLower = 650;
+const int sensorCheckUpper = 950;
 
 MFRC522 rfid(RFID_SS_PIN, RST_PIN);
 DS3231 RTC;
@@ -42,15 +44,23 @@ String modeToString(mode_select mode) {
   switch (mode) {
     case GREEN: return "Wejście";
     case RED: return "Wyjście";
+    case CHECK_ID: return "Sprawdź ID";
     default: return "Brak";
   }
 }
 
+
+
 mode_select readButton() {
   int sensorValue = analogRead(analogInPin);
+  // Serial.println("analog: " + String(sensorValue)); // odkomentuj do debugowania
   if (sensorValue < sensorWaiting) return NONE;
-  if (sensorValue > sensorInLower && sensorValue < sensorInUpper) return GREEN;
-  else if (sensorValue > sensorOutLower && sensorValue < sensorOutUpper) return RED;
+
+  // Sprawdź czy w zakresie CHECK_ID (650..950)
+  if (sensorValue >= sensorCheckLower && sensorValue <= sensorCheckUpper) return CHECK_ID;
+
+  if (sensorValue >= sensorInLower && sensorValue <= sensorInUpper) return GREEN;
+  else if (sensorValue >= sensorOutLower && sensorValue <= sensorOutUpper) return RED;
   return NONE;
 }
 
@@ -153,10 +163,11 @@ void handleDeleteUser() {
 // --- STRONA GŁÓWNA ---
 void handleRoot() {
   String html = "<html><head><meta charset='utf-8'><title>Rejestr RFID</title></head><body>";
-  html += "<h2>POLSL RACING - Rejestr wejść/wyjść</h2>";
+  html += "<h2>POLSL RACING- Rejestr wejść/wyjść</h2>";
   html += "<p>Aktualny tryb: <b>" + modeToString(currentMode) + "</b></p>";
   html += "<a href='/setMode?mode=GREEN'><button>Tryb Wejście</button></a>";
   html += "<a href='/setMode?mode=RED'><button>Tryb Wyjście</button></a>";
+  html += "<a href='/setMode?mode=CHECK_ID'><button>Tryb Sprawdź ID</button></a>";
 
   // --- Formularz dodania użytkownika ---
   html += "<hr><h3>Dodaj / Przypisz użytkownika</h3>";
@@ -321,7 +332,22 @@ void loop() {
 
     Serial.print("Karta UID: "); Serial.println(uid);
     Serial.print("Tryb: "); Serial.println(modeToString(currentMode));
-    logCardToSD(uid);
+
+    if (currentMode == CHECK_ID) {
+      // SPRAWDZANIE: czy UID jest w users.csv
+      String userData = findUser(uid);
+      if (userData != ";;") {
+        // znaleziono
+        Serial.println("KARTA PRZYPISANA -> " + userData);
+      } else {
+        Serial.println("KARTA: BRAK PRZYPISANIA");
+      }
+      // nadal zapisujemy do logu, ale tryb będzie "Sprawdź ID"
+      logCardToSD(uid);
+    } else {
+      // normalne logowanie dla WEJŚCIE/WYJŚCIE/itd.
+      logCardToSD(uid);
+    }
 
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
