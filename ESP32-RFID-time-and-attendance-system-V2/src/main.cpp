@@ -6,6 +6,14 @@
 #include <SD.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7735.h>
+
+#define TFT_CS   D0
+#define TFT_DC   D3
+#define TFT_RST  D9 //not used
+
+
 
 #define RFID_SS_PIN D8
 #define SD_SS_PIN D4
@@ -19,6 +27,9 @@ bool pmFlag;
 
 unsigned long previousMillis = 0;
 const long interval = 100;
+unsigned long displayStartTime = 0;
+bool showingCardInfo = false;
+
 
 enum mode_select { GREEN, RED, CHECK_ID, NONE };
 mode_select currentMode = NONE;
@@ -34,11 +45,13 @@ const int sensorCheckUpper = 950;
 MFRC522 rfid(RFID_SS_PIN, RST_PIN);
 DS3231 RTC;
 File logFile;
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+
 
 ESP8266WebServer server(80);
 
-const char* ssid = "ESP32_RFID";
-const char* password = "12345678";
+const char* ssid = "RCP-POLSL-RACING";
+const char* password = "ESOKOCHAPIWO";
 
 String modeToString(mode_select mode) {
   switch (mode) {
@@ -87,7 +100,22 @@ String findUser(String uid) {
   usersFile.close();
   return ";;";
 }
+void displayErrorMessage(String message) {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_RED);
+  tft.setCursor(5, 40);
+  tft.println("BLAD!");
 
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(5, 80);
+  tft.println(message);
+
+  displayStartTime = millis();
+  showingCardInfo = true;
+  delay(2000); // Wyświetl przez 2 sekundy
+}
 // --- ZAPIS KARTY DO LOGA ---
 void logCardToSD(String uid) {
   String timestamp = String(RTC.getYear()) + "-" +
@@ -105,6 +133,7 @@ void logCardToSD(String uid) {
     Serial.println("Zapisano: " + timestamp + " UID:" + uid + " -> " + userData);
   } else {
     Serial.println("Błąd zapisu log.txt");
+    displayErrorMessage("Blad zapisu log.txt");
   }
 }
 // --- POBIERANIE LISTY UŻYTKOWNIKÓW DO DROPLISTY ---
@@ -279,9 +308,84 @@ void handleDownload() {
   logFile.close();
 }
 
+void displayModeMessage(mode_select mode, String uid = "", String userData = "") {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setCursor(5, 30);
+  tft.setTextSize(2);
+
+  if (mode == GREEN) {
+    tft.setTextColor(ST77XX_GREEN);
+    tft.println("Wejscie");
+  } else if (mode == RED) {
+    tft.setTextColor(ST77XX_RED);
+    tft.println("Wyjscie");
+    tft.setCursor(5, 50);
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_BLUE);
+    tft.println("ausfahrt");
+  } else if (mode == CHECK_ID) {
+    tft.setTextColor(ST77XX_BLUE);
+    tft.println("Rejestracja");
+  } else {
+    tft.setTextColor(ST77XX_WHITE);
+    tft.println("Brak trybu");
+  }
+
+  if (uid != "") {
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(5, 70);
+    tft.println("Karta:");
+    tft.setCursor(5, 85);
+    tft.println(uid);
+
+    // --- Jeśli userData jest dostępne, wypisz imię i nazwisko ---
+    if (userData != ";;") {
+      int first = userData.indexOf(';');
+      int second = userData.indexOf(';', first + 1);
+      String imie = userData.substring(0, first);
+      String nazwisko = userData.substring(first + 1, second);
+
+      tft.setCursor(5, 105);
+      tft.setTextColor(ST77XX_YELLOW);
+      tft.print(imie + " ");
+      tft.println(nazwisko);
+    } else {
+      tft.setCursor(5, 105);
+      tft.setTextColor(ST77XX_RED);
+      tft.println("Nieznana karta");
+    }
+  }
+
+  // znacznik czasu i flaga
+  displayStartTime = millis();
+  showingCardInfo = true;
+}
+
+
+void displayIdleMessage() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(10, 50);
+  tft.println("Insert Card ");
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_RED);
+  tft.setCursor(40, 90);
+  tft.println("Polsl Racing");
+  
+}
+
+
 void setup() {
   Serial.begin(115200);
   SPI.begin();
+  tft.initR(INITR_BLACKTAB);  // inicjalizacja ST7735
+
+  tft.setRotation(3);         // opcjonalnie: 1 = poziomo, 0 = pionowo
+  displayIdleMessage();
+
   Wire.begin();
   rfid.PCD_Init();
   pinMode(ON_Board_LED, OUTPUT);
@@ -289,6 +393,7 @@ void setup() {
 
   if (!SD.begin(SD_SS_PIN)) {
     Serial.println("Błąd inicjalizacji SD!");
+    displayErrorMessage("Blad karty SD!");
   } else {
     Serial.println("SD gotowe.");
   }
@@ -332,6 +437,9 @@ void loop() {
 
     Serial.print("Karta UID: "); Serial.println(uid);
     Serial.print("Tryb: "); Serial.println(modeToString(currentMode));
+ 
+
+
 
     if (currentMode == CHECK_ID) {
       // SPRAWDZANIE: czy UID jest w users.csv
@@ -344,12 +452,22 @@ void loop() {
       }
       // nadal zapisujemy do logu, ale tryb będzie "Sprawdź ID"
       logCardToSD(uid);
+      displayModeMessage(currentMode, uid, userData);
     } else {
       // normalne logowanie dla WEJŚCIE/WYJŚCIE/itd.
       logCardToSD(uid);
+      String userData = findUser(uid);
+      displayModeMessage(currentMode, uid, userData);
     }
 
     rfid.PICC_HaltA();
     rfid.PCD_StopCrypto1();
+    
   }
+  // Sprawdź, czy minęło 3 sekundy od wyświetlenia karty
+  if (showingCardInfo && millis() - displayStartTime >= 4000) {
+    displayIdleMessage();
+    showingCardInfo = false;
+  }
+
 }

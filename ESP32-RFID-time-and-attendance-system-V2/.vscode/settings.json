@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "*.yml": "dockercompose",
+        "system_error": "cpp"
+    }
+}
